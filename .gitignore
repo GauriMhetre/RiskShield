@@ -46,6 +46,9 @@ build/
 logs/
 *.log
 
+# Data
+data/processed/*.csv
+
 # Packaging
 *.egg-info/
 dist/
