@@ -10,9 +10,17 @@ The route ties together:
   3. Feature engineering (ml/features.py: compute_features)
   4. Model inference (backend/app/ml/model_loader.py: ModelLoader)
   5. Response formatting (ScoreResponse Pydantic model)
+
+Request timing is instrumented throughout to measure:
+  - Feature engineering duration (milliseconds)
+  - Model inference duration (milliseconds)
+  - Total scoring duration (milliseconds)
+
+These metrics are logged for every request to support latency monitoring and diagnosis.
 """
 
 import logging
+import time
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request
 
@@ -66,9 +74,20 @@ async def score_transaction(request_body: ScoreRequest, request: Request) -> Sco
         )
 
         # ====================================================================
+        # TIMING POINT 1: Start feature engineering timer
+        # ====================================================================
+        t_feature_start = time.perf_counter()
+
+        # ====================================================================
         # Step 3: Compute all 10 fraud-detection features
         # ====================================================================
         feature_dict = compute_features(transaction, profile)
+
+        # ====================================================================
+        # TIMING POINT 2: End feature engineering timer, start inference timer
+        # ====================================================================
+        t_feature_end = time.perf_counter()
+        t_inference_start = time.perf_counter()
 
         # ====================================================================
         # Step 4: Get the ModelLoader instance from app startup
@@ -80,6 +99,11 @@ async def score_transaction(request_body: ScoreRequest, request: Request) -> Sco
         # Step 5: Predict fraud probability
         # ====================================================================
         risk_score = model_loader.predict_proba(feature_dict)
+
+        # ====================================================================
+        # TIMING POINT 3: End inference timer
+        # ====================================================================
+        t_inference_end = time.perf_counter()
 
         # ====================================================================
         # Step 6: Determine if flagged based on threshold
@@ -119,6 +143,22 @@ async def score_transaction(request_body: ScoreRequest, request: Request) -> Sco
         ]
 
         # ====================================================================
+        # Compute timing durations in milliseconds
+        # ====================================================================
+        feature_engineering_ms = round((t_feature_end - t_feature_start) * 1000, 2)
+        inference_ms = round((t_inference_end - t_inference_start) * 1000, 2)
+        total_ms = round(feature_engineering_ms + inference_ms, 2)
+
+        # ====================================================================
+        # Log the successful scoring with all timing metrics
+        # ====================================================================
+        logger.info(
+            f"txn_id={request_body.txn_id} user_id={request_body.user_id} "
+            f"feature_engineering_ms={feature_engineering_ms} inference_ms={inference_ms} "
+            f"total_ms={total_ms} flagged={flagged} risk_score={round(risk_score, 4)}"
+        )
+
+        # ====================================================================
         # Step 8: Build and return the response
         # ====================================================================
         return ScoreResponse(
@@ -131,15 +171,17 @@ async def score_transaction(request_body: ScoreRequest, request: Request) -> Sco
 
     except ValueError as e:
         # Feature computation or predict_proba() validation error
-        logger.warning(f"Scoring error for txn {request_body.txn_id}: {str(e)}")
+        # Log the error BEFORE raising the HTTPException so it appears in logs
+        logger.error(f"txn_id={request_body.txn_id} ValueError: {str(e)}")
         raise HTTPException(
             status_code=422,
             detail=f"Scoring failed: {str(e)}",
         )
     except Exception as e:
         # Any other error (shouldn't happen, but catch and log)
+        # Log the error BEFORE raising the HTTPException so it appears in logs
         logger.error(
-            f"Unexpected error scoring txn {request_body.txn_id}: {type(e).__name__}: {str(e)}"
+            f"txn_id={request_body.txn_id} {type(e).__name__}: {str(e)}"
         )
         raise HTTPException(
             status_code=422,

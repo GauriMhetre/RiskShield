@@ -18,6 +18,15 @@ from backend.app.ml.model_loader import ModelLoader
 from backend.app.api import score as score_routes
 
 
+# Configure basic logging for the entire application
+# Format includes timestamp, level, module name, and message
+# INFO level captures startup/shutdown and request-level details;
+# WARNING and ERROR messages will also be visible
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+    level=logging.INFO,
+)
+
 logger = logging.getLogger(__name__)
 
 
