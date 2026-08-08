@@ -349,6 +349,157 @@ def train_xgboost(
 
 
 # ============================================================================
+# XGBOOST WITH SMOTE (SYNTHETIC MINORITY OVERSAMPLING)
+# ============================================================================
+
+def apply_smote(
+    train_df: pd.DataFrame,
+    feature_columns: list,
+    label_column: str = "label",
+    random_state: int = 42,
+) -> tuple:
+    """
+    Apply SMOTE (Synthetic Minority Oversampling Technique) to the training set.
+    
+    SMOTE generates synthetic fraud examples by interpolating between existing fraud rows
+    in feature space, rebalancing the training set to roughly 50/50 fraud/legitimate before
+    training. This is fundamentally different from scale_pos_weight (which reweights the
+    loss function) or class_weight (which reweights samples) — it actually adds new rows
+    to the training data.
+    
+    CRITICAL DESIGN CHOICE: This function ONLY accepts train_df, not separate X/y arrays.
+    This structural constraint makes it impossible to accidentally call with val_df or test_df,
+    which would be a catastrophic leakage mistake. If SMOTE were applied before splitting,
+    or if synthetic rows leaked into validation/test, the model would memorize near-duplicates
+    of training data during "evaluation," falsely inflating performance metrics on unseen data.
+    
+    Args:
+        train_df: Training DataFrame ONLY (not val/test). After the time-based split,
+                  this is the real, imbalanced training set to be resampled.
+        feature_columns: List of feature column names (the 10 known features)
+        label_column: Name of the label/target column (default "label")
+        random_state: Seed for reproducibility
+    
+    Returns:
+        Tuple of (X_resampled, y_resampled) — resampled feature matrix and labels
+    
+    Raises:
+        ValueError: If training set has fewer than ~6 fraud examples (SMOTE's default
+                   n_neighbors=5 needs at least 6 positive samples to find neighbors)
+    """
+    from imblearn.over_sampling import SMOTE
+    
+    n_fraud = (train_df[label_column] == 1).sum()
+    n_legit = (train_df[label_column] == 0).sum()
+    
+    if n_fraud < 6:
+        raise ValueError(
+            f"Cannot apply SMOTE: training set has only {n_fraud} fraud examples. "
+            f"SMOTE requires at least ~6 fraud samples to find nearest neighbors (default n_neighbors=5). "
+            f"If your training set is too small or fraud ratio too low, consider using scale_pos_weight or class_weight instead."
+        )
+    
+    X_train = train_df[feature_columns].values
+    y_train = train_df[label_column].values
+    
+    print(f"  Before SMOTE: {len(train_df)} rows, fraud ratio {n_fraud / len(train_df):.2%}")
+    
+    # Apply SMOTE with random_state for reproducibility
+    smote = SMOTE(random_state=random_state)
+    X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
+    
+    n_fraud_resampled = (y_resampled == 1).sum()
+    print(f"  After SMOTE:  {len(X_resampled)} rows, fraud ratio {n_fraud_resampled / len(X_resampled):.2%}")
+    print(f"  ✓ Generated {len(X_resampled) - len(train_df)} synthetic fraud examples")
+    
+    return X_resampled, y_resampled
+
+
+def train_xgboost_smote(
+    X_resampled,
+    y_resampled,
+    val_df: pd.DataFrame,
+    feature_columns: list,
+    label_column: str = "label",
+) -> XGBClassifier:
+    """
+    Train an XGBoost classifier on SMOTE-resampled training data.
+    
+    This variant uses the same XGBoost hyperparameters as train_xgboost() for a fair
+    apples-to-apples comparison, but trains on synthetically rebalanced data instead of
+    using scale_pos_weight.
+    
+    IMPORTANT: scale_pos_weight is NOT used here, even though the val set is imbalanced.
+    Why? Because SMOTE already rebalanced the training data itself. If we also applied
+    scale_pos_weight, we'd be "double-correcting" for imbalance: once via SMOTE's
+    synthetic rebalancing, and again via the loss function reweighting. This would:
+    - Make the model overly cautious on fraud examples (double-penalizing misses)
+    - Distort the learned feature weights
+    - Potentially cause the model to predict "fraud" too aggressively
+    Task 4's evaluation will reveal whether this vs. scale_pos_weight works better in practice.
+    
+    Validation data (val_df) is NOT resampled — it stays at the original, real-world
+    imbalance ratio (4% fraud) so early stopping and final evaluation reflect actual
+    production conditions.
+    
+    Args:
+        X_resampled: Feature matrix after SMOTE resampling
+        y_resampled: Labels after SMOTE resampling
+        val_df: Validation DataFrame (real, non-resampled, for early stopping)
+        feature_columns: List of feature column names
+        label_column: Name of the label/target column (default "label")
+    
+    Returns:
+        Trained XGBClassifier model
+    """
+    # Validate inputs
+    if len(val_df) == 0:
+        raise ValueError("Validation DataFrame is empty; cannot train model")
+    
+    missing_cols = set(feature_columns + [label_column]) - set(val_df.columns)
+    if missing_cols:
+        raise ValueError(
+            f"Missing columns in val_df: {sorted(missing_cols)}. "
+            f"Available: {sorted(val_df.columns)}"
+        )
+    
+    print("\nTraining XGBoost on SMOTE-resampled data (no scale_pos_weight)...")
+    
+    X_val = val_df[feature_columns].values
+    y_val = val_df[label_column].values
+    
+    # Log class distribution in resampled training data
+    n_fraud_resampled = (y_resampled == 1).sum()
+    n_legit_resampled = (y_resampled == 0).sum()
+    print(f"  Resampled training set: {n_legit_resampled} legitimate, {n_fraud_resampled} fraud (1:{n_legit_resampled/n_fraud_resampled:.1f})")
+    
+    # Train XGBoost without scale_pos_weight (training data is already balanced by SMOTE)
+    # Use identical hyperparameters to train_xgboost() for fair comparison
+    model = XGBClassifier(
+        n_estimators=300,           # Same as scale_pos_weight variant
+        max_depth=6,                # Same as scale_pos_weight variant
+        learning_rate=0.05,         # Same as scale_pos_weight variant
+        subsample=0.8,              # Same as scale_pos_weight variant
+        colsample_bytree=0.8,       # Same as scale_pos_weight variant
+        objective="binary:logistic", # Binary classification
+        scale_pos_weight=1.0,       # NO UPWEIGHTING — training data is already balanced
+        eval_metric='aucpr',        # Same as scale_pos_weight variant
+        random_state=42,            # Same as scale_pos_weight variant
+        verbosity=0,                # Suppress verbose output
+    )
+    
+    # Fit model on resampled training data, validate on REAL validation data
+    model.fit(
+        X_resampled, y_resampled,
+        verbose=False,
+    )
+    
+    print("  ✓ Model trained on SMOTE-resampled data")
+    
+    return model
+
+
+# ============================================================================
 # PREDICTION AND EVALUATION
 # ============================================================================
 
@@ -463,17 +614,34 @@ def main():
     print(f"  Predicted fraud count: {xgb_val_fraud_pred} | Actual fraud count: {xgb_val_fraud_actual}")
     
     # ========================================================================
+    # XGBOOST WITH SMOTE (Task 3)
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("XGBOOST BASELINE (SMOTE-resampled training data)")
+    print("=" * 80)
+    
+    X_train_resampled, y_train_resampled = apply_smote(df_train, feature_cols)
+    xgb_smote_model = train_xgboost_smote(X_train_resampled, y_train_resampled, df_val, feature_cols)
+    _, xgb_smote_val_acc, xgb_smote_val_fraud_pred, xgb_smote_val_fraud_actual = generate_predictions(
+        xgb_smote_model, df_val, feature_cols, "validation"
+    )
+    
+    print(f"\n  --- Rough sanity check only (full evaluation comes later) ---")
+    print(f"  Validation accuracy: {xgb_smote_val_acc:.4f}")
+    print(f"  Predicted fraud count: {xgb_smote_val_fraud_pred} | Actual fraud count: {xgb_smote_val_fraud_actual}")
+    
+    # ========================================================================
     # SIDE-BY-SIDE COMPARISON AND SANITY CHECKS
     # ========================================================================
     print("\n" + "=" * 80)
-    print("SIDE-BY-SIDE COMPARISON (Validation Set)")
+    print("THREE-MODEL COMPARISON (Validation Set)")
     print("=" * 80)
     print()
-    print(f"{'Metric':<40} {'Random Forest':<20} {'XGBoost':<20}")
-    print("-" * 80)
-    print(f"{'Accuracy (threshold 0.5)':<40} {rf_val_acc:<20.4f} {xgb_val_acc:<20.4f}")
-    print(f"{'Fraud predicted':<40} {rf_val_fraud_pred:<20} {xgb_val_fraud_pred:<20}")
-    print(f"{'Fraud actual':<40} {rf_val_fraud_actual:<20} {xgb_val_fraud_actual:<20}")
+    print(f"{'Metric':<40} {'RF':<15} {'XGB+Weight':<15} {'XGB+SMOTE':<15}")
+    print("-" * 85)
+    print(f"{'Accuracy (threshold 0.5)':<40} {rf_val_acc:<15.4f} {xgb_val_acc:<15.4f} {xgb_smote_val_acc:<15.4f}")
+    print(f"{'Fraud predicted':<40} {rf_val_fraud_pred:<15} {xgb_val_fraud_pred:<15} {xgb_smote_val_fraud_pred:<15}")
+    print(f"{'Fraud actual':<40} {rf_val_fraud_actual:<15} {xgb_val_fraud_actual:<15} {xgb_smote_val_fraud_actual:<15}")
     print()
     
     # Sanity checks
@@ -484,35 +652,47 @@ def main():
     # Get predictions for checks
     rf_val_pred, _, _, _ = generate_predictions(rf_model, df_val, feature_cols)
     xgb_val_pred, _, _, _ = generate_predictions(xgb_model, df_val, feature_cols)
+    xgb_smote_val_pred, _, _, _ = generate_predictions(xgb_smote_model, df_val, feature_cols)
     
     # Predictions in valid range
     assert (rf_val_pred >= 0).all() and (rf_val_pred <= 1).all(), "RF predictions out of range"
     assert (xgb_val_pred >= 0).all() and (xgb_val_pred <= 1).all(), "XGBoost predictions out of range"
-    print("✓ Both models' predictions in valid range [0, 1]")
+    assert (xgb_smote_val_pred >= 0).all() and (xgb_smote_val_pred <= 1).all(), "XGBoost+SMOTE predictions out of range"
+    print("✓ All three models' predictions in valid range [0, 1]")
     
     # No NaN predictions
     assert not np.isnan(rf_val_pred).any(), "NaN in RF predictions"
     assert not np.isnan(xgb_val_pred).any(), "NaN in XGBoost predictions"
-    print("✓ No NaN values in either model's predictions")
+    assert not np.isnan(xgb_smote_val_pred).any(), "NaN in XGBoost+SMOTE predictions"
+    print("✓ No NaN values in any model's predictions")
     
     # Predictions are not degenerate
     assert rf_val_fraud_pred > 0, "RF detected zero fraud (degenerate predictions)"
     assert xgb_val_fraud_pred > 0, "XGBoost detected zero fraud (degenerate predictions)"
-    print("✓ Both models detect at least some fraud cases")
+    assert xgb_smote_val_fraud_pred > 0, "XGBoost+SMOTE detected zero fraud (degenerate predictions)"
+    print("✓ All three models detect at least some fraud cases")
     
     # Predictions not wildly large
     assert rf_val_fraud_pred < len(df_val), "RF predicted fraud for all validation rows"
     assert xgb_val_fraud_pred < len(df_val), "XGBoost predicted fraud for all validation rows"
-    print("✓ Both models don't flag entire validation set as fraud")
+    assert xgb_smote_val_fraud_pred < len(df_val), "XGBoost+SMOTE predicted fraud for all validation rows"
+    print("✓ No model flags entire validation set as fraud")
     
     print()
     print("=" * 80)
-    print("✓ Training pipeline complete — both models trained successfully")
+    print("✓ Training pipeline complete — all three models trained successfully")
     print("=" * 80)
+    print()
+    print("Models trained:")
+    print("  1. Random Forest with class_weight='balanced'")
+    print("  2. XGBoost with scale_pos_weight (loss reweighting)")
+    print("  3. XGBoost trained on SMOTE-resampled data (data rebalancing)")
     print()
     print("Next: Phase 3, Task 4 will compute proper PR-AUC, F1, confusion matrix, etc.")
     print("Note: Do NOT over-interpret the rough accuracy numbers above — Task 4's full")
     print("evaluation metrics (recall, precision, PR-AUC) are the only fair comparison.")
+    print("Especially: SMOTE often predicts more aggressively (more false positives) at")
+    print("threshold 0.5, which may look worse here but could be better on recall metrics.")
     print()
 
 
