@@ -26,6 +26,7 @@ pip-delete-this-directory.txt
 .coverage.*
 .pytest_cache/
 htmlcov/
+.ipynb_checkpoints/
 
 # Node
 node_modules/
