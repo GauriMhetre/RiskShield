@@ -47,7 +47,9 @@ logs/
 *.log
 
 # Data
+data/raw/*
 data/processed/*.csv
+kaggle.json
 
 # Packaging
 *.egg-info/
