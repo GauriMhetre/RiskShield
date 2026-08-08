@@ -185,9 +185,9 @@ def compute_geo_distance(
         Distance in kilometers between the two points.
 
     Note:
-        If lat2 or lon2 is None (brand-new user, no prior location history), we return 0.0.
-        A new user's first transaction has "0 distance traveled," which is correct and
-        non-fraudulent. Once the user completes a transaction, their location is recorded
+        If lat2 or lon2 (or lat1/lon1 for a brand-new user) is None (no prior location history),
+        we return 0.0. A new user's first transaction has "0 distance traveled," which is correct
+        and non-fraudulent. Once the user completes a transaction, their location is recorded
         and this feature becomes active for future transactions.
 
     Formula (high level):
@@ -196,8 +196,8 @@ def compute_geo_distance(
         - Multiply by Earth's radius to get distance in km
         - The formula accounts for latitude variations and the spherical geometry
     """
-    # Handle missing prior location (brand-new user)
-    if lat2 is None or lon2 is None:
+    # Handle missing prior location (brand-new user, no home location set yet)
+    if lat1 is None or lon1 is None or lat2 is None or lon2 is None:
         return 0.0
 
     # Validate that inputs are numbers (not strings, not completely invalid data)
@@ -244,3 +244,205 @@ def _validate_numeric_input(value, field_name: str) -> float:
         raise ValueError(
             f"{field_name} must be numeric, got {type(value).__name__}: {value}"
         )
+
+
+# ============================================================================
+# Data Classes (Simple Dicts for Cross-Layer Compatibility)
+# ============================================================================
+
+
+class TransactionInput:
+    """
+    Represents a single transaction being scored.
+
+    This is a simple data container (not a Pydantic model to keep dependencies minimal)
+    with required fields for fraud scoring. Can be created from dict unpacking:
+        TransactionInput(**transaction_dict)
+
+    Attributes:
+        transaction_id: Unique identifier for this transaction.
+        amount: Transaction amount in user's home currency.
+        device_id: Device fingerprint/identifier for this transaction.
+        country: Country code (e.g., "US", "IN", "SG") where transaction occurred.
+        latitude: Geographic latitude of transaction origin.
+        longitude: Geographic longitude of transaction origin.
+        created_at: Datetime when the transaction occurred.
+    """
+
+    def __init__(
+        self,
+        transaction_id: str,
+        amount: float,
+        device_id: str,
+        country: str,
+        latitude: float,
+        longitude: float,
+        created_at: datetime,
+    ):
+        self.transaction_id = transaction_id
+        self.amount = amount
+        self.device_id = device_id
+        self.country = country
+        self.latitude = latitude
+        self.longitude = longitude
+        self.created_at = created_at
+
+
+class UserProfile:
+    """
+    Represents a user's profile and behavioral history.
+
+    This is a simple data container with fields aggregated from user history.
+    Can be created from dict unpacking: UserProfile(**profile_dict)
+
+    Attributes:
+        user_id: Unique identifier for this user.
+        avg_amount: User's historical mean transaction amount.
+        std_amount: User's historical standard deviation of amounts.
+        known_device_ids: List of device IDs this user has used before.
+        home_country: User's established home country (where they typically transact).
+        home_latitude: User's home location latitude.
+        home_longitude: User's home location longitude.
+        recent_txn_timestamps: List of datetime objects for recent transactions (not including current).
+    """
+
+    def __init__(
+        self,
+        user_id: str,
+        avg_amount: float,
+        std_amount: float,
+        known_device_ids: list,
+        home_country: str,
+        home_latitude: float,
+        home_longitude: float,
+        recent_txn_timestamps: list,
+    ):
+        self.user_id = user_id
+        self.avg_amount = avg_amount
+        self.std_amount = std_amount
+        self.known_device_ids = known_device_ids
+        self.home_country = home_country
+        self.home_latitude = home_latitude
+        self.home_longitude = home_longitude
+        self.recent_txn_timestamps = recent_txn_timestamps
+
+
+# ============================================================================
+# High-Level Feature Computation Wrapper
+# ============================================================================
+
+
+def compute_features(transaction: TransactionInput, profile: UserProfile) -> dict:
+    """
+    Compute all fraud-detection features for a single transaction.
+
+    This is the HIGH-LEVEL wrapper that combines the low-level feature functions
+    into a single feature vector. It is used identically by:
+      - Training pipeline (Phase 3): to build feature matrices for model training
+      - Live API (Phase 4): to score incoming transactions in real-time
+      - EDA/notebooks: for exploratory analysis
+
+    The function returns a feature dictionary suitable for:
+      - Direct input to a model (all numeric values)
+      - Inspection by analysts (human-readable feature names)
+      - Storage in databases or logs (flat dict, JSON-serializable)
+
+    Args:
+        transaction: TransactionInput object with current transaction details.
+        profile: UserProfile object with user's historical data.
+
+    Returns:
+        Dictionary with exactly 10 feature keys:
+          - "txn_count_1h": int, number of transactions in last hour
+          - "txn_count_24h": int, number of transactions in last 24 hours
+          - "amount_zscore": float, z-score of amount vs. user's history
+          - "amount_ratio_to_avg": float, amount / user's historical average
+          - "device_mismatch": int (0 or 1), is this a new/unknown device?
+          - "country_mismatch": int (0 or 1), is transaction from different country?
+          - "geo_distance_km": float, distance from user's home location (km)
+          - "amount": float, the transaction amount itself
+          - "hour_of_day": int (0-23), hour when transaction occurred
+          - "day_of_week": int (0-6), day of week when transaction occurred (0=Monday)
+
+    Note:
+        This function gracefully handles brand-new users (empty history) without errors.
+        It has no side effects: no database access, no file I/O, no state mutation.
+        All 10 features are always present and numeric (never None or NaN).
+
+    Example:
+        >>> transaction = TransactionInput(
+        ...     transaction_id="txn_123",
+        ...     amount=5000.0,
+        ...     device_id="dev_abc",
+        ...     country="US",
+        ...     latitude=40.7128,
+        ...     longitude=-74.0060,
+        ...     created_at=datetime(2026, 8, 7, 14, 30, 0)
+        ... )
+        >>> profile = UserProfile(
+        ...     user_id="user_xyz",
+        ...     avg_amount=1000.0,
+        ...     std_amount=200.0,
+        ...     known_device_ids=["dev_abc"],
+        ...     home_country="US",
+        ...     home_latitude=40.7128,
+        ...     home_longitude=-74.0060,
+        ...     recent_txn_timestamps=[datetime(2026, 8, 7, 13, 0, 0)]
+        ... )
+        >>> features = compute_features(transaction, profile)
+        >>> print(features)
+        {
+            'txn_count_1h': 0,
+            'txn_count_24h': 1,
+            'amount_zscore': 20.0,
+            'amount_ratio_to_avg': 5.0,
+            'device_mismatch': 0,
+            'country_mismatch': 0,
+            'geo_distance_km': 0.0,
+            'amount': 5000.0,
+            'hour_of_day': 14,
+            'day_of_week': 3
+        }
+    """
+    # Compute velocity features (1-hour and 24-hour windows)
+    txn_count_1h = compute_velocity(profile.recent_txn_timestamps, transaction.created_at, 1.0)
+    txn_count_24h = compute_velocity(profile.recent_txn_timestamps, transaction.created_at, 24.0)
+
+    # Compute amount deviation features
+    amount_deviation = compute_amount_deviation(
+        transaction.amount, profile.avg_amount, profile.std_amount
+    )
+
+    # Compute device mismatch
+    device_mismatch = compute_device_mismatch(transaction.device_id, profile.known_device_ids)
+
+    # Compute country mismatch
+    country_mismatch = compute_country_mismatch(transaction.country, profile.home_country)
+
+    # Compute geographic distance
+    geo_distance_km = compute_geo_distance(
+        profile.home_latitude,
+        profile.home_longitude,
+        transaction.latitude,
+        transaction.longitude,
+    )
+
+    # Extract temporal features
+    hour_of_day = transaction.created_at.hour
+    day_of_week = transaction.created_at.weekday()
+
+    # Assemble the final feature vector
+    features = {
+        "txn_count_1h": txn_count_1h,
+        "txn_count_24h": txn_count_24h,
+        "amount_zscore": amount_deviation["amount_zscore"],
+        "amount_ratio_to_avg": amount_deviation["amount_ratio_to_avg"],
+        "device_mismatch": device_mismatch,
+        "country_mismatch": country_mismatch,
+        "geo_distance_km": geo_distance_km,
+        "amount": transaction.amount,
+        "hour_of_day": hour_of_day,
+        "day_of_week": day_of_week,
+    }
+
+    return features
