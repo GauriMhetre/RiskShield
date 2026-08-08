@@ -23,11 +23,10 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Numeric,
-    INET,
     JSON,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID as PostgresUUID
+from sqlalchemy.dialects.postgresql import UUID as PostgresUUID, INET
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column, relationship
 
 
