@@ -27,10 +27,12 @@ import numpy as np
 from pathlib import Path
 from datetime import datetime
 import pickle
+import json
 
 # ML libraries
 from sklearn.ensemble import RandomForestClassifier
 from xgboost import XGBClassifier
+import joblib
 from ml.batch_features import compute_features_batch
 
 
@@ -541,13 +543,133 @@ def generate_predictions(
 
 
 # ============================================================================
+# MODEL SERIALIZATION (Phase 3, Task 5)
+# ============================================================================
+
+def save_model_artifact(
+    model,
+    threshold: float,
+    feature_columns: list,
+    model_version: str,
+    model_type: str,
+    save_dir: str = "ml/models",
+) -> None:
+    """
+    Save a trained model along with its decision threshold and feature schema.
+    
+    Artifacts saved:
+    - {model_version}.pkl: the trained model object via joblib.dump
+    - {model_version}_metadata.json: threshold, feature schema, model type, and timestamp
+    
+    Separating the threshold from the model file allows Phase 4's API to load both
+    independently, and makes it easy to retune the threshold later without retraining.
+    Saving the exact feature column list guards against future train/serve skew if
+    ml/features.py ever changes (e.g., adding or renaming a feature).
+    
+    Args:
+        model: Trained classifier (RandomForestClassifier or XGBClassifier)
+        threshold: Float decision threshold (0-1) for binary classification
+        feature_columns: List of feature column names in training order
+        model_version: Version identifier (e.g., "model_v1")
+        model_type: Human-readable model description (e.g., "xgboost_class_weighted")
+        save_dir: Directory to save artifacts (default "ml/models")
+    
+    Raises:
+        ValueError: If save_dir cannot be created or written to
+    """
+    save_path = Path(save_dir)
+    try:
+        save_path.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        raise ValueError(f"Cannot create model save directory {save_dir}: {e}")
+    
+    # Save model
+    model_file = save_path / f"{model_version}.pkl"
+    try:
+        joblib.dump(model, model_file)
+        print(f"✓ Saved model to {model_file}")
+    except Exception as e:
+        raise ValueError(f"Cannot save model to {model_file}: {e}")
+    
+    # Save metadata
+    metadata = {
+        "model_version": model_version,
+        "model_type": model_type,
+        "threshold": float(threshold),  # Ensure it serializes as float, not numpy type
+        "feature_columns": feature_columns,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    
+    metadata_file = save_path / f"{model_version}_metadata.json"
+    try:
+        with open(metadata_file, "w") as f:
+            json.dump(metadata, f, indent=2)
+        print(f"✓ Saved metadata to {metadata_file}")
+    except Exception as e:
+        raise ValueError(f"Cannot save metadata to {metadata_file}: {e}")
+
+
+def load_model_artifact(
+    model_version: str,
+    save_dir: str = "ml/models",
+) -> tuple:
+    """
+    Load a saved model and its associated metadata.
+    
+    This function is stateless and has no side effects beyond reading files —
+    it's designed to be called from Phase 4's API without any surprise state changes.
+    
+    Args:
+        model_version: Version identifier (e.g., "model_v1")
+        save_dir: Directory where artifacts were saved
+    
+    Returns:
+        Tuple of (model, metadata_dict) where metadata_dict contains:
+        - model_version, model_type, threshold, feature_columns, timestamp
+    
+    Raises:
+        FileNotFoundError: If either the model or metadata file is missing
+    """
+    save_path = Path(save_dir)
+    
+    model_file = save_path / f"{model_version}.pkl"
+    if not model_file.exists():
+        raise FileNotFoundError(f"Model file not found: {model_file}")
+    
+    metadata_file = save_path / f"{model_version}_metadata.json"
+    if not metadata_file.exists():
+        raise FileNotFoundError(f"Metadata file not found: {metadata_file}")
+    
+    # Load model
+    model = joblib.load(model_file)
+    
+    # Load metadata
+    with open(metadata_file, "r") as f:
+        metadata = json.load(f)
+    
+    return model, metadata
+
+
+# ============================================================================
 # MAIN ORCHESTRATION
 # ============================================================================
 
 def main():
-    """Main entry point: load data, split, train RF and XGBoost, compare."""
+    """Main entry point: load data, split, train models, evaluate, select winner, and save."""
+    # ========================================================================
+    # PHASE 3, TASK 5: MODEL SELECTION AND SERIALIZATION
+    # ========================================================================
+    # SET THIS BASED ON YOUR READING OF THE TASK 4 COMPARISON TABLE
+    # Options: "Random Forest", "XGBoost (class-weighted)", "XGBoost (SMOTE)"
+    WINNING_MODEL = "XGBoost (class-weighted)"
+    
+    # Precision floor for threshold selection
+    # Find the lowest threshold where precision >= this value
+    # Adjust this value based on your operational needs
+    MIN_PRECISION = 0.75
+    
     print("=" * 80)
-    print("RiskShield Training Pipeline — Phase 3, Tasks 1-2")
+    print("RiskShield Training Pipeline — Phase 3, Tasks 1-5")
     print("=" * 80)
     print()
     
@@ -757,6 +879,79 @@ def main():
     print("  - F1: Harmonic mean of precision and recall. Good all-around metric.")
     print("  - Recall@2%FPR: Given 2% false-positive budget, max fraud detection rate achieved.")
     print("                  This is the most business-realistic metric for fraud systems.")
+    print()
+    
+    # ========================================================================
+    # PHASE 3, TASK 5: MODEL SELECTION AND THRESHOLD TUNING
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("MODEL SELECTION AND SERIALIZATION (Phase 3, Task 5)")
+    print("=" * 80)
+    print()
+    
+    # Map model names to trained model objects
+    model_map = {
+        "Random Forest": rf_model,
+        "XGBoost (class-weighted)": xgb_model,
+        "XGBoost (SMOTE)": xgb_smote_model,
+    }
+    
+    model_type_map = {
+        "Random Forest": "random_forest_class_weighted",
+        "XGBoost (class-weighted)": "xgboost_class_weighted",
+        "XGBoost (SMOTE)": "xgboost_smote",
+    }
+    
+    # Select the winning model
+    if WINNING_MODEL not in model_map:
+        raise ValueError(
+            f"Unknown model: {WINNING_MODEL}. "
+            f"Must be one of: {list(model_map.keys())}"
+        )
+    
+    selected_model = model_map[WINNING_MODEL]
+    model_type = model_type_map[WINNING_MODEL]
+    
+    print(f"Winning model: {WINNING_MODEL}")
+    print()
+    
+    # Select threshold using min_precision criterion
+    from ml.evaluate import select_threshold
+    
+    print(f"Selecting threshold with min_precision={MIN_PRECISION}...")
+    selected_threshold = select_threshold(
+        selected_model,
+        X_val,
+        y_val,
+        min_precision=MIN_PRECISION,
+    )
+    print(f"Selected threshold: {selected_threshold:.4f} (lowest threshold meeting precision floor)")
+    print()
+    
+    # Save the model artifact
+    save_model_artifact(
+        selected_model,
+        threshold=selected_threshold,
+        feature_columns=feature_cols,
+        model_version="model_v1",
+        model_type=model_type,
+        save_dir="ml/models",
+    )
+    print()
+    
+    # Verify the artifact can be reloaded
+    print("Verifying artifact reload...")
+    loaded_model, loaded_metadata = load_model_artifact("model_v1", save_dir="ml/models")
+    print(f"✓ Successfully reloaded model_v1")
+    print(f"  Model type: {loaded_metadata['model_type']}")
+    print(f"  Threshold: {loaded_metadata['threshold']:.4f}")
+    print(f"  Features ({len(loaded_metadata['feature_columns'])}): {loaded_metadata['feature_columns']}")
+    print()
+    print("=" * 80)
+    print("✓ Phase 3 complete — model selected and serialized")
+    print("=" * 80)
+    print()
+    print("Next: Phase 4 — Build FastAPI /score endpoint using the saved model_v1 artifact")
     print()
 
 

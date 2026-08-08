@@ -265,3 +265,79 @@ def compare_all(results, fpr_results) -> None:
         print(row)
     
     print()
+
+
+def select_threshold(
+    model,
+    X_val,
+    y_val,
+    min_precision: float = None,
+    target_recall_at_fpr: dict = None,
+) -> float:
+    """
+    Select an optimal decision threshold for the fraud classifier.
+    
+    Instead of using the default 0.5 threshold (which is arbitrary and rarely optimal),
+    this function looks up a threshold from the PR curve that matches a chosen business
+    criterion: either a minimum acceptable precision, or the threshold computed from
+    a fixed false-positive budget (from recall_at_fixed_fpr()).
+    
+    If min_precision is used:
+    - Finds the LOWEST threshold where precision >= min_precision
+    - Why lowest, not highest? A higher threshold requires more certainty to flag fraud,
+      catching fewer cases (lower recall). The lowest threshold that still meets precision
+      guards maximizes the fraud you catch subject to keeping false alarms under control.
+      In fraud detection, catching more fraud within a precision budget is almost always
+      better than being overly conservative.
+    
+    If target_recall_at_fpr is used:
+    - Directly uses the 'threshold_used' from recall_at_fixed_fpr()'s output
+    - This threshold was already optimized for a fixed false-positive budget,
+      the most business-realistic criterion for fraud systems
+    
+    Args:
+        model: Trained classifier with predict_proba method
+        X_val: Validation feature matrix
+        y_val: Validation labels (0/1)
+        min_precision: Minimum acceptable precision (e.g., 0.75)
+        target_recall_at_fpr: Dict from recall_at_fixed_fpr() containing 'threshold_used'
+    
+    Returns:
+        Float threshold value between 0 and 1
+    
+    Raises:
+        ValueError: If neither or both of min_precision/target_recall_at_fpr are provided,
+                   or if no threshold meets the min_precision constraint
+    """
+    if (min_precision is None and target_recall_at_fpr is None) or \
+       (min_precision is not None and target_recall_at_fpr is not None):
+        raise ValueError(
+            "Exactly one of min_precision or target_recall_at_fpr must be provided, not both or neither."
+        )
+    
+    # If using target_recall_at_fpr, just return its pre-computed threshold
+    if target_recall_at_fpr is not None:
+        return target_recall_at_fpr["threshold_used"]
+    
+    # Otherwise, use min_precision: find lowest threshold meeting the constraint
+    y_pred_proba = model.predict_proba(X_val)[:, 1]
+    precisions, recalls, thresholds = precision_recall_curve(y_val, y_pred_proba)
+    
+    # Find indices where precision >= min_precision
+    # Note: precision_recall_curve returns precisions with one extra element,
+    # so we align thresholds carefully
+    valid_indices = np.where(precisions[:-1] >= min_precision)[0]
+    
+    if len(valid_indices) == 0:
+        raise ValueError(
+            f"No threshold achieves precision >= {min_precision:.3f} on this validation set. "
+            f"Max achievable precision: {precisions.max():.3f}. "
+            f"Consider lowering min_precision."
+        )
+    
+    # Pick the LOWEST threshold among those meeting the precision floor
+    # (this maximizes recall subject to the precision constraint)
+    best_idx = valid_indices[np.argmin(thresholds[valid_indices])]
+    selected_threshold = thresholds[best_idx]
+    
+    return selected_threshold
