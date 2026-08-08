@@ -688,11 +688,75 @@ def main():
     print("  2. XGBoost with scale_pos_weight (loss reweighting)")
     print("  3. XGBoost trained on SMOTE-resampled data (data rebalancing)")
     print()
-    print("Next: Phase 3, Task 4 will compute proper PR-AUC, F1, confusion matrix, etc.")
-    print("Note: Do NOT over-interpret the rough accuracy numbers above — Task 4's full")
-    print("evaluation metrics (recall, precision, PR-AUC) are the only fair comparison.")
-    print("Especially: SMOTE often predicts more aggressively (more false positives) at")
-    print("threshold 0.5, which may look worse here but could be better on recall metrics.")
+    
+    # ========================================================================
+    # REAL EVALUATION (Phase 3, Task 4)
+    # ========================================================================
+    print("\n" + "=" * 80)
+    print("REAL EVALUATION SUITE (Validation Set)")
+    print("=" * 80)
+    
+    from ml.evaluate import evaluate_model, recall_at_fixed_fpr, plot_pr_curve, compare_all
+    
+    # Extract validation features and labels
+    X_val = df_val[feature_cols].values
+    y_val = df_val["label"].values
+    
+    # Evaluate all three models
+    results = []
+    fpr_results = []
+    
+    print("\n" + "=" * 80)
+    print("Metrics at threshold 0.5")
+    print("=" * 80)
+    
+    result_rf = evaluate_model(rf_model, X_val, y_val, "Random Forest")
+    results.append(result_rf)
+    
+    result_xgb = evaluate_model(xgb_model, X_val, y_val, "XGBoost (class-weighted)")
+    results.append(result_xgb)
+    
+    result_smote = evaluate_model(xgb_smote_model, X_val, y_val, "XGBoost (SMOTE)")
+    results.append(result_smote)
+    
+    # Compute recall at fixed FPR (2% false-positive budget)
+    print("\n" + "=" * 80)
+    print("Recall at Fixed False-Positive Rate (2% budget)")
+    print("=" * 80)
+    print()
+    
+    fpr_rf = recall_at_fixed_fpr(rf_model, X_val, y_val, max_fpr=0.02)
+    fpr_results.append(fpr_rf)
+    print(f"Random Forest:            recall = {fpr_rf['recall_at_budget']:.4f} at fpr = {fpr_rf['achieved_fpr']:.4f}")
+    
+    fpr_xgb = recall_at_fixed_fpr(xgb_model, X_val, y_val, max_fpr=0.02)
+    fpr_results.append(fpr_xgb)
+    print(f"XGBoost (class-weighted): recall = {fpr_xgb['recall_at_budget']:.4f} at fpr = {fpr_xgb['achieved_fpr']:.4f}")
+    
+    fpr_smote = recall_at_fixed_fpr(xgb_smote_model, X_val, y_val, max_fpr=0.02)
+    fpr_results.append(fpr_smote)
+    print(f"XGBoost (SMOTE):          recall = {fpr_smote['recall_at_budget']:.4f} at fpr = {fpr_smote['achieved_fpr']:.4f}")
+    
+    # Plot PR curves
+    print()
+    models_and_names = [
+        (rf_model, "Random Forest"),
+        (xgb_model, "XGBoost (class-weighted)"),
+        (xgb_smote_model, "XGBoost (SMOTE)"),
+    ]
+    plot_pr_curve(models_and_names, X_val, y_val)
+    print("✓ Saved PR curve comparison to ml/models/pr_curve_comparison.png")
+    
+    # Print final comparison table
+    compare_all(results, fpr_results)
+    
+    print("=" * 100)
+    print()
+    print("Interpretation guide:")
+    print("  - PR-AUC: Higher is better. Represents model's ability to trade off precision vs recall.")
+    print("  - F1: Harmonic mean of precision and recall. Good all-around metric.")
+    print("  - Recall@2%FPR: Given 2% false-positive budget, max fraud detection rate achieved.")
+    print("                  This is the most business-realistic metric for fraud systems.")
     print()
 
 
