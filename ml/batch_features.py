@@ -1,17 +1,22 @@
 """
-Batch feature engineering for RiskShield.
+Batch feature engineering for RiskShield fraud detection.
 
-This module provides DataFrame-level feature computation, used for:
-  - Training pipeline (Phase 3): batch computing features for entire datasets
-  - Model validation/inference: scoring large batches of historical transactions
-  - EDA/analysis: exploratory data analysis on feature distributions
+This module computes features for entire historical datasets by calling the SAME
+compute_features() function used by the live API, ensuring ZERO train/serve skew.
 
-Key principle: It wraps the single-transaction compute_features() from
-ml.features (ensuring no duplication of logic), applying it row-by-row
-via pandas apply() and groupby operations for efficiency.
+CRITICAL RULE: NO ROW MAY EVER SEE ANOTHER ROW'S FUTURE DATA
+================================================================
+Data leakage is prevented by:
+1. Sorting the entire DataFrame by timestamp FIRST (before any grouping)
+2. Processing rows strictly in chronological order within each user group
+3. For each row, building a UserProfile using ONLY transactions that occurred
+   BEFORE that row's timestamp — never including the current row or any future row
+4. This ensures each row's features depend only on information that would have been
+   available at the time of that transaction in a real-time system
 
-No pandas operations or DataFrame logic is duplicated elsewhere — this is
-the SINGLE SOURCE OF TRUTH for batch feature computation.
+Violating this rule (e.g., accidentally including future rows in velocity calculations)
+would cause the model to learn patterns that don't exist in production, leading to
+catastrophic accuracy degradation and undetectable failures in live scoring.
 """
 
 import pandas as pd
@@ -28,272 +33,240 @@ def compute_features_batch(
     latitude_col: str = "latitude",
     longitude_col: str = "longitude",
     timestamp_col: str = "created_at",
-    label_col: str = None,
 ) -> pd.DataFrame:
     """
     Compute fraud-detection features for a batch of transactions.
 
-    This is the batch/DataFrame version of compute_features(). It:
-    1. Groups transactions by user
-    2. Computes user profile statistics (avg/std amounts, device list, location, etc.)
-    3. For each transaction, builds its feature vector using the shared
-       compute_features() function from ml.features
-    4. Returns a new DataFrame with all 10 features plus optional passthrough columns
+    This function processes an entire dataset of transactions, computing the 10 fraud
+    features for each row by calling the shared compute_features() function from ml.features.
+    It is used for training data preparation and batch scoring of historical transactions.
 
-    This ensures ZERO train/serve skew: the same underlying compute_features()
-    logic runs here during training, and later in the live API during scoring.
+    The function takes generic column names to work identically with multiple schemas
+    (synthetic transactions, IEEE-CIS Kaggle data, etc.) without code duplication.
+
+    Key design: This implementation is intentionally row-by-row-within-groupby for
+    clarity and correctness, not maximally optimized. For datasets of 15K-50K rows,
+    the performance is acceptable. If this ever needs to scale to millions of rows,
+    a more vectorized rewrite would be needed, but that is out of scope for now.
 
     Args:
-        df: Input DataFrame with transaction records. Expected columns:
-            - user_id_col: User identifier
-            - amount_col: Transaction amount
-            - device_id_col: Device fingerprint
-            - country_col: Country code (e.g., "US", "IN", "SG")
-            - latitude_col: Geographic latitude
-            - longitude_col: Geographic longitude
-            - timestamp_col: Transaction datetime (must be datetime64 or convertible)
-            - label_col (optional): Ground-truth label (0=legit, 1=fraud) for training
-        user_id_col: Name of the user ID column (default: "user_id")
-        amount_col: Name of the amount column (default: "amount")
-        device_id_col: Name of the device ID column (default: "device_id")
-        country_col: Name of the country column (default: "country")
-        latitude_col: Name of the latitude column (default: "latitude")
-        longitude_col: Name of the longitude column (default: "longitude")
-        timestamp_col: Name of the timestamp column (default: "created_at")
-        label_col: Name of the label column (optional, default: None)
+        df: Input DataFrame with transaction records. Must contain the columns specified
+            by the col parameters below.
+        user_id_col: Name of the user ID column (e.g., "user_id", "card1")
+        amount_col: Name of the transaction amount column (e.g., "amount", "TransactionAmt")
+        device_id_col: Name of the device ID column (e.g., "device_id", "DeviceType")
+        country_col: Name of the country code column (e.g., "country")
+        latitude_col: Name of the latitude column (e.g., "latitude")
+        longitude_col: Name of the longitude column (e.g., "longitude")
+        timestamp_col: Name of the timestamp column (e.g., "created_at", "TransactionDT")
 
     Returns:
-        DataFrame with original columns plus 10 feature columns:
-          - "txn_count_1h"
-          - "txn_count_24h"
-          - "amount_zscore"
-          - "amount_ratio_to_avg"
-          - "device_mismatch"
-          - "country_mismatch"
-          - "geo_distance_km"
-          - "amount" (passthrough from input)
-          - "hour_of_day"
-          - "day_of_week"
-        
-        Plus passthrough columns from the input:
-          - user_id, transaction_id (if exists), label (if provided), and others
+        A new DataFrame with the same number of rows as the input, containing:
+        - All 10 computed feature columns (txn_count_1h, amount_zscore, etc.)
+        - Passthrough columns: the user_id column, any "label" or "isFraud" column if present,
+          and any transaction ID column if present
+        - Original DataFrame is not modified (safe to use repeatedly)
 
     Raises:
-        ValueError: if required columns are missing or timestamp is not datetime
-
-    Note:
-        For the first transaction of a brand-new user, velocity features will be 0,
-        amount deviations will be 0.0 (no baseline yet), device_mismatch will be 1,
-        and geo_distance will be 0.0. This is expected and correct behavior — the
-        model learns that new users have these fallback values.
+        ValueError: If any required column does not exist in df
 
     Example:
         >>> import pandas as pd
         >>> df = pd.read_csv("data/processed/synthetic_transactions.csv",
         ...                   parse_dates=["created_at"])
-        >>> features_df = compute_features_batch(df)
+        >>> features_df = compute_features_batch(
+        ...     df,
+        ...     user_id_col="user_id",
+        ...     amount_col="amount",
+        ...     device_id_col="device_id",
+        ...     country_col="country",
+        ...     latitude_col="latitude",
+        ...     longitude_col="longitude",
+        ...     timestamp_col="created_at"
+        ... )
         >>> print(features_df.shape)
-        (15000, 21)  # 10 features + passthrough columns
-        >>> print(features_df[["user_id", "amount", "txn_count_1h", "device_mismatch"]].head())
+        (15052, 13)  # 10 features + 3 passthrough columns
     """
-    # Validate required columns exist
-    required_cols = [user_id_col, amount_col, device_id_col, country_col, 
-                     latitude_col, longitude_col, timestamp_col]
-    missing_cols = [col for col in required_cols if col not in df.columns]
+    # Validate that all required columns exist before processing
+    required_cols = {
+        user_id_col,
+        amount_col,
+        device_id_col,
+        country_col,
+        latitude_col,
+        longitude_col,
+        timestamp_col,
+    }
+    missing_cols = required_cols - set(df.columns)
     if missing_cols:
-        raise ValueError(f"Missing required columns: {missing_cols}")
-
-    # Ensure timestamp is datetime
-    if not pd.api.types.is_datetime64_any_dtype(df[timestamp_col]):
-        try:
-            df = df.copy()  # Avoid modifying original
-            df[timestamp_col] = pd.to_datetime(df[timestamp_col])
-        except Exception as e:
-            raise ValueError(f"Could not parse {timestamp_col} as datetime: {e}")
-
-    # Sort by user and timestamp for proper velocity calculation
-    df = df.sort_values([user_id_col, timestamp_col]).reset_index(drop=True)
-
-    # Compute user profiles: aggregate statistics for each user
-    user_profiles = _compute_user_profiles(
-        df,
-        user_id_col=user_id_col,
-        amount_col=amount_col,
-        device_id_col=device_id_col,
-        country_col=country_col,
-        latitude_col=latitude_col,
-        longitude_col=longitude_col,
-        timestamp_col=timestamp_col,
-    )
-
-    # Compute features row-by-row using the shared single-transaction function
-    feature_list = []
-    for idx, row in df.iterrows():
-        features = _compute_row_features(
-            row=row,
-            user_profiles=user_profiles,
-            user_id_col=user_id_col,
-            amount_col=amount_col,
-            device_id_col=device_id_col,
-            country_col=country_col,
-            latitude_col=latitude_col,
-            longitude_col=longitude_col,
-            timestamp_col=timestamp_col,
-            df_for_velocity=df,
+        raise ValueError(
+            f"DataFrame is missing required columns: {sorted(missing_cols)}. "
+            f"Available columns: {sorted(df.columns)}"
         )
-        feature_list.append(features)
+
+    # CRITICAL: Sort by timestamp FIRST, before any grouping
+    # This ensures all row-by-row processing happens in chronological order
+    df_sorted = df.sort_values(timestamp_col).reset_index(drop=True)
+
+    # Collect computed features for each row
+    features_list = []
+
+    # Process each user's transactions in chronological order
+    for user_id, user_group in df_sorted.groupby(user_id_col):
+        user_rows = list(user_group.itertuples(index=True, name=None))
+
+        # Process each transaction for this user
+        for row_idx, row in enumerate(user_group.itertuples(index=True)):
+            # Build UserProfile using ONLY prior transactions (strictly before this row)
+            # LEAKAGE PREVENTION: Only iterate through rows 0..row_idx-1, never including
+            # the current row (row_idx) or any future rows (row_idx+1..end)
+            prior_rows = list(user_group.itertuples())[: row_idx]
+
+            # Compute aggregates from prior transactions only
+            prior_amounts = []
+            prior_devices = set()
+            prior_countries = []
+            prior_timestamps = []
+
+            for prior_row in prior_rows:
+                prior_amount = getattr(prior_row, amount_col, None)
+                if prior_amount is not None:
+                    try:
+                        prior_amounts.append(float(prior_amount))
+                    except (ValueError, TypeError):
+                        pass
+
+                prior_device = getattr(prior_row, device_id_col, None)
+                if prior_device is not None and pd.notna(prior_device):
+                    prior_devices.add(str(prior_device))
+
+                prior_country = getattr(prior_row, country_col, None)
+                if prior_country is not None and pd.notna(prior_country):
+                    prior_countries.append(str(prior_country))
+
+                prior_timestamp = getattr(prior_row, timestamp_col, None)
+                if prior_timestamp is not None:
+                    prior_timestamps.append(pd.Timestamp(prior_timestamp).to_pydatetime())
+
+            # Compute user's historical statistics from prior transactions
+            if prior_amounts:
+                avg_amount = sum(prior_amounts) / len(prior_amounts)
+                # Compute std: even with 1 prior transaction, std=0 (no variance)
+                if len(prior_amounts) > 1:
+                    variance = sum((x - avg_amount) ** 2 for x in prior_amounts) / len(prior_amounts)
+                    std_amount = variance ** 0.5
+                else:
+                    std_amount = 0.0
+            else:
+                # Brand-new user: no prior transactions
+                avg_amount = 0.0
+                std_amount = 0.0
+
+            # Most common prior country, or first if only one
+            if prior_countries:
+                # Use most common
+                country_counts = {}
+                for c in prior_countries:
+                    country_counts[c] = country_counts.get(c, 0) + 1
+                home_country = max(country_counts, key=country_counts.get)
+            else:
+                home_country = None
+
+            # Last known location: use the most recent prior transaction
+            if prior_rows:
+                last_prior_row = prior_rows[-1]
+                home_latitude = getattr(last_prior_row, latitude_col, None)
+                home_longitude = getattr(last_prior_row, longitude_col, None)
+                # Convert to float, handle NaN
+                try:
+                    home_latitude = float(home_latitude) if pd.notna(home_latitude) else None
+                except (ValueError, TypeError):
+                    home_latitude = None
+                try:
+                    home_longitude = float(home_longitude) if pd.notna(home_longitude) else None
+                except (ValueError, TypeError):
+                    home_longitude = None
+            else:
+                home_latitude = None
+                home_longitude = None
+
+            # Build UserProfile for this row
+            profile = UserProfile(
+                user_id=user_id,
+                avg_amount=avg_amount,
+                std_amount=std_amount,
+                known_device_ids=list(prior_devices),
+                home_country=home_country,
+                home_latitude=home_latitude,
+                home_longitude=home_longitude,
+                recent_txn_timestamps=prior_timestamps,
+            )
+
+            # Build TransactionInput from current row
+            current_amount = getattr(row, amount_col, None)
+            current_device = getattr(row, device_id_col, None)
+            current_country = getattr(row, country_col, None)
+            current_latitude = getattr(row, latitude_col, None)
+            current_longitude = getattr(row, longitude_col, None)
+            current_timestamp = getattr(row, timestamp_col, None)
+
+            # Convert to appropriate types, handling NaN/None
+            try:
+                current_amount = float(current_amount)
+            except (ValueError, TypeError):
+                current_amount = 0.0
+
+            current_device = str(current_device) if pd.notna(current_device) else None
+            current_country = str(current_country) if pd.notna(current_country) else None
+
+            try:
+                current_latitude = float(current_latitude) if pd.notna(current_latitude) else None
+            except (ValueError, TypeError):
+                current_latitude = None
+
+            try:
+                current_longitude = float(current_longitude) if pd.notna(current_longitude) else None
+            except (ValueError, TypeError):
+                current_longitude = None
+
+            current_timestamp = pd.Timestamp(current_timestamp).to_pydatetime()
+
+            # Get transaction ID if it exists
+            txn_id = getattr(row, "transaction_id", None) or getattr(row, "TransactionID", None)
+            if txn_id is None:
+                txn_id = str(row.Index)
+
+            transaction = TransactionInput(
+                transaction_id=str(txn_id),
+                amount=current_amount,
+                device_id=current_device,
+                country=current_country,
+                latitude=current_latitude,
+                longitude=current_longitude,
+                created_at=current_timestamp,
+            )
+
+            # Compute features using the shared function
+            features_dict = compute_features(transaction, profile)
+
+            # Add passthrough columns: user ID and label if present
+            features_dict[user_id_col] = user_id
+
+            # Auto-detect and include label column if present
+            if "label" in df.columns:
+                features_dict["label"] = row.label
+            elif "isFraud" in df.columns:
+                features_dict["isFraud"] = row.isFraud
+
+            # Include transaction ID if original df has one
+            if "transaction_id" in df.columns:
+                features_dict["transaction_id"] = getattr(row, "transaction_id", txn_id)
+            elif "TransactionID" in df.columns:
+                features_dict["TransactionID"] = getattr(row, "TransactionID", txn_id)
+
+            features_list.append(features_dict)
 
     # Convert list of dicts to DataFrame
-    features_df = pd.DataFrame(feature_list)
+    result_df = pd.DataFrame(features_list)
 
-    # Passthrough: add original columns (user_id, label if present, etc.)
-    passthrough_cols = [user_id_col]
-    if "transaction_id" in df.columns:
-        passthrough_cols.append("transaction_id")
-    if label_col and label_col in df.columns:
-        passthrough_cols.append(label_col)
-
-    for col in passthrough_cols:
-        if col in df.columns:
-            features_df.insert(0, col, df[col].values)
-
-    return features_df
-
-
-def _compute_user_profiles(
-    df: pd.DataFrame,
-    user_id_col: str,
-    amount_col: str,
-    device_id_col: str,
-    country_col: str,
-    latitude_col: str,
-    longitude_col: str,
-    timestamp_col: str,
-) -> dict:
-    """
-    Compute aggregate user profiles from the full dataset.
-
-    For each user, compute:
-      - avg_amount, std_amount: historical mean/std of transaction amounts
-      - known_device_ids: list of devices this user has used
-      - home_country: user's most common country (or first transaction country)
-      - home_latitude, home_longitude: user's most common/last known location
-
-    Args:
-        df: Full transaction DataFrame (must be sorted by user and timestamp)
-        Column name parameters for flexible column naming
-
-    Returns:
-        Dictionary mapping user_id -> dict with profile fields:
-            {
-                "user_id": str,
-                "avg_amount": float,
-                "std_amount": float,
-                "known_device_ids": list,
-                "home_country": str,
-                "home_latitude": float,
-                "home_longitude": float,
-            }
-    """
-    profiles = {}
-
-    for user_id, group in df.groupby(user_id_col):
-        # Amount statistics
-        amounts = group[amount_col].astype(float)
-        avg_amount = amounts.mean()
-        std_amount = amounts.std() if len(group) > 1 else 0.0
-
-        # Devices
-        known_device_ids = group[device_id_col].dropna().unique().tolist()
-
-        # Location: use the most common country, or first if tie
-        country_counts = group[country_col].value_counts()
-        home_country = country_counts.index[0] if len(country_counts) > 0 else None
-
-        # Home location: use the last (most recent) transaction location
-        last_row = group.iloc[-1]
-        home_latitude = last_row[latitude_col]
-        home_longitude = last_row[longitude_col]
-
-        profiles[user_id] = {
-            "user_id": user_id,
-            "avg_amount": avg_amount,
-            "std_amount": std_amount if not pd.isna(std_amount) else 0.0,
-            "known_device_ids": known_device_ids,
-            "home_country": home_country,
-            "home_latitude": home_latitude,
-            "home_longitude": home_longitude,
-        }
-
-    return profiles
-
-
-def _compute_row_features(
-    row: pd.Series,
-    user_profiles: dict,
-    user_id_col: str,
-    amount_col: str,
-    device_id_col: str,
-    country_col: str,
-    latitude_col: str,
-    longitude_col: str,
-    timestamp_col: str,
-    df_for_velocity: pd.DataFrame,
-) -> dict:
-    """
-    Compute features for a single transaction row.
-
-    Internal helper: builds TransactionInput and UserProfile objects,
-    then calls the shared compute_features() function.
-
-    Args:
-        row: A single row from the DataFrame
-        user_profiles: Dictionary of precomputed user profiles
-        df_for_velocity: The full DataFrame, used to compute velocity
-                        (recent transactions for this user)
-        Column name parameters for flexible column naming
-
-    Returns:
-        Dictionary with the 10 feature keys (from compute_features())
-    """
-    user_id = row[user_id_col]
-    profile_dict = user_profiles.get(user_id, {})
-
-    # Build TransactionInput
-    transaction = TransactionInput(
-        transaction_id=str(row.get("transaction_id", "")),
-        amount=float(row[amount_col]),
-        device_id=str(row[device_id_col]),
-        country=str(row[country_col]) if pd.notna(row[country_col]) else None,
-        latitude=float(row[latitude_col]) if pd.notna(row[latitude_col]) else None,
-        longitude=float(row[longitude_col]) if pd.notna(row[longitude_col]) else None,
-        created_at=pd.Timestamp(row[timestamp_col]).to_pydatetime(),
-    )
-
-    # Compute recent transactions for this user (excluding current row)
-    user_txns = df_for_velocity[df_for_velocity[user_id_col] == user_id]
-    current_idx = row.name if hasattr(row, 'name') else None
-    
-    # Get recent timestamps (excluding current transaction)
-    recent_timestamps = []
-    for idx, txn_row in user_txns.iterrows():
-        if idx != current_idx:  # Exclude current transaction
-            ts = pd.Timestamp(txn_row[timestamp_col]).to_pydatetime()
-            recent_timestamps.append(ts)
-
-    # Build UserProfile
-    profile = UserProfile(
-        user_id=user_id,
-        avg_amount=profile_dict.get("avg_amount", 0.0),
-        std_amount=profile_dict.get("std_amount", 0.0),
-        known_device_ids=profile_dict.get("known_device_ids", []),
-        home_country=profile_dict.get("home_country", None),
-        home_latitude=profile_dict.get("home_latitude", None),
-        home_longitude=profile_dict.get("home_longitude", None),
-        recent_txn_timestamps=recent_timestamps,
-    )
-
-    # Compute features using the shared single-transaction function
-    features = compute_features(transaction, profile)
-
-    return features
+    return result_df
