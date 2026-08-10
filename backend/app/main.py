@@ -13,6 +13,7 @@ and store it on app.state so all requests can reuse it without reloading from di
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.ml.model_loader import ModelLoader
 from backend.app.api import score as score_routes
@@ -28,6 +29,15 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# CORS configuration: allowed origins for frontend development and deployment
+# Phase 6: localhost:5173 is Vite's dev server (React development)
+# Phase 8: will add deployed frontend URL (e.g., https://www.example.com)
+# For now, keep this specific and narrow — never use "*" in production without strong justification
+ALLOWED_ORIGINS = [
+    "http://localhost:5173",  # Vite React dev server (Phase 6)
+    "http://localhost:3000",  # Alternative dev port if needed
+]
 
 
 @asynccontextmanager
@@ -75,6 +85,24 @@ app = FastAPI(
     title="RiskShield",
     version="0.1.0",
     lifespan=lifespan,
+)
+
+# Add CORS middleware to allow frontend development server to make requests
+# CORS (Cross-Origin Resource Sharing) protects users by preventing unauthorized
+# cross-origin requests. Browser blocks fetch() calls from origin A to origin B
+# unless origin B explicitly allows it via CORS headers.
+#
+# Here we allow specific origins (ALLOWED_ORIGINS) to make requests with any method/header.
+# This is safer than allow_origins=["*"] because:
+# 1. Specific whitelist prevents accidental exposure to random origins
+# 2. Credentials/auth tokens can safely be sent (allow_credentials=True)
+# 3. Easy to add production domains in Phase 8 without changing logic
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Register the score route(s)
