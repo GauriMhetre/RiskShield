@@ -215,3 +215,36 @@ def upsert_user_profile(
 
     session.commit()
     return profile
+
+
+def get_flagged_transactions_with_details(
+    session: Session,
+    since: Optional[datetime] = None,
+    min_score: float = 0.0,
+    limit: int = 50,
+) -> list[tuple[ScoredTransaction, Transaction]]:
+    """
+    Fetch flagged transactions with their associated transaction details.
+    
+    Args:
+        session: SQLAlchemy session
+        since: Optional datetime to filter by scored_at >= since
+        min_score: Minimum risk score to filter by
+        limit: Maximum number of results to return
+        
+    Returns:
+        List of tuples containing (ScoredTransaction, Transaction)
+    """
+    stmt = (
+        select(ScoredTransaction, Transaction)
+        .join(Transaction, ScoredTransaction.txn_id == Transaction.txn_id)
+        .where(ScoredTransaction.flagged == True)
+        .where(ScoredTransaction.risk_score >= min_score)
+    )
+    
+    if since:
+        stmt = stmt.where(ScoredTransaction.scored_at >= since)
+        
+    stmt = stmt.order_by(desc(ScoredTransaction.scored_at)).limit(limit)
+    
+    return session.execute(stmt).all()

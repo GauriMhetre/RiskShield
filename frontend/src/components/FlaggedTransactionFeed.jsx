@@ -2,7 +2,7 @@ import React, { useState, useCallback } from 'react';
 import { getFlags } from '../api/client';
 import { usePolling } from '../hooks/usePolling';
 
-export default function FlaggedTransactionFeed() {
+export default function FlaggedTransactionFeed({ selectedFlag, onSelectFlag }) {
   const [flags, setFlags] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -52,18 +52,29 @@ export default function FlaggedTransactionFeed() {
           </tr>
         </thead>
         <tbody>
-          {flags.map((flag) => (
-            <tr key={flag.txn_id}>
-              <td style={tdStyle}>{new Date(flag.scored_at).toLocaleString()}</td>
-              <td style={tdStyle} title={flag.user_id}>
-                {flag.user_id.length > 8 ? `${flag.user_id.substring(0, 8)}...` : flag.user_id}
-              </td>
-              <td style={tdStyle}>${parseFloat(flag.amount).toFixed(2)}</td>
-              <td style={tdStyle}>{flag.country}</td>
-              <td style={tdStyle}>{parseFloat(flag.risk_score).toFixed(2)}</td>
-              <td style={tdStyle}>{flag.model_version}</td>
-            </tr>
-          ))}
+          {flags.map((flag) => {
+            const isSelected = selectedFlag && selectedFlag.txn_id === flag.txn_id;
+            return (
+              <tr 
+                key={flag.txn_id} 
+                onClick={() => onSelectFlag(flag)}
+                style={{ 
+                  cursor: 'pointer',
+                  backgroundColor: isSelected ? '#e6f7ff' : 'transparent',
+                  transition: 'background-color 0.2s'
+                }}
+              >
+                <td style={tdStyle}>{new Date(flag.scored_at).toLocaleString()}</td>
+                <td style={tdStyle} title={flag.user_id}>
+                  {flag.user_id.length > 8 ? `${flag.user_id.substring(0, 8)}...` : flag.user_id}
+                </td>
+                <td style={tdStyle}>${parseFloat(flag.amount).toFixed(2)}</td>
+                <td style={tdStyle}>{flag.country}</td>
+                <td style={tdStyle}>{parseFloat(flag.risk_score).toFixed(2)}</td>
+                <td style={tdStyle}>{flag.model_version}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.ml.model_loader import ModelLoader
 from backend.app.api import score as score_routes
+from backend.app.api import flags as flags_routes
 
 
 # Configure basic logging for the entire application
@@ -107,6 +108,7 @@ app.add_middleware(
 
 # Register the score route(s)
 app.include_router(score_routes.router)
+app.include_router(flags_routes.router)
 
 
 @app.get("/health")
