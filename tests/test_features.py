@@ -404,3 +404,33 @@ def test_compute_features_brand_new_user_no_exception():
         assert isinstance(value, (int, float)), (
             f"Feature '{key}' should be numeric, got {type(value)}: {value}"
         )
+
+
+def test_compute_features_invalid_created_at():
+    """
+    Test that compute_features() raises an AttributeError if created_at is a string
+    instead of a datetime object. This documents that date parsing must happen
+    upstream (e.g., via Pydantic or Pandas).
+    """
+    transaction = TransactionInput(
+        transaction_id="txn_002",
+        amount=100.0,
+        device_id="dev_1",
+        country="US",
+        latitude=40.7,
+        longitude=-74.0,
+        created_at="2026-08-07T12:00:00Z",  # String instead of datetime
+    )
+    profile = UserProfile(
+        user_id="user_002",
+        avg_amount=0.0,
+        std_amount=0.0,
+        known_device_ids=[],
+        home_country=None,
+        home_latitude=None,
+        home_longitude=None,
+        recent_txn_timestamps=[],
+    )
+    
+    with pytest.raises(AttributeError):
+        compute_features(transaction, profile)

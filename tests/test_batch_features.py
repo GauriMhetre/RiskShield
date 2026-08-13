@@ -313,3 +313,25 @@ def test_compute_features_batch_does_not_mutate_input():
     
     # Verify input is unchanged
     pd.testing.assert_frame_equal(df, df_copy, check_dtype=True, check_names=True)
+
+
+def test_compute_features_batch_missing_column_raises_error():
+    """
+    Test that compute_features_batch() raises a clear ValueError if a required column is missing.
+    """
+    df = create_simple_batch_df()
+    
+    # Drop a required column
+    df_missing = df.drop(columns=["amount"])
+    
+    with pytest.raises(ValueError, match="DataFrame is missing required columns"):
+        compute_features_batch(
+            df_missing,
+            user_id_col="user_id",
+            amount_col="amount",
+            device_id_col="device_id",
+            country_col="country",
+            latitude_col="latitude",
+            longitude_col="longitude",
+            timestamp_col="created_at",
+        )
