@@ -8,9 +8,10 @@
  * - In a later phase, this becomes environment-configurable (not hardcoded)
  */
 
-// API base URL — will become an environment variable in a later phase (Phase 8/9)
-// For now, hardcoded to match the FastAPI backend's default development port
-const API_BASE_URL = "http://localhost:8000";
+// Vite exposes build-time environment variables prefixed with VITE_ via import.meta.env.
+// This allows the SAME source code to be built once for local development (using the fallback)
+// and once for Docker/deployment (using a build-time override), without ever editing this file again.
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
 /**
  * Fetch flagged transactions from the backend.

@@ -11,6 +11,7 @@ and store it on app.state so all requests can reuse it without reloading from di
 """
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,12 +34,18 @@ logger = logging.getLogger(__name__)
 
 # CORS configuration: allowed origins for frontend development and deployment
 # Phase 6: localhost:5173 is Vite's dev server (React development)
-# Phase 8: will add deployed frontend URL (e.g., https://www.example.com)
-# For now, keep this specific and narrow — never use "*" in production without strong justification
-ALLOWED_ORIGINS = [
-    "http://localhost:5173",  # Vite React dev server (Phase 6)
-    "http://localhost:3000",  # Alternative dev port if needed
-]
+# Phase 8: reads deployed frontend URL from ALLOWED_ORIGINS environment variable
+# if it exists, splitting by comma for multiple origins. Falls back to localhost.
+# This lets the deployed backend allow the real deployed frontend URL without
+# hardcoding it or requiring a code change/redeploy to update.
+allowed_origins_env = os.environ.get("ALLOWED_ORIGINS")
+if allowed_origins_env:
+    ALLOWED_ORIGINS = [origin.strip() for origin in allowed_origins_env.split(",")]
+else:
+    ALLOWED_ORIGINS = [
+        "http://localhost:5173",  # Vite React dev server (Phase 6)
+        "http://localhost:3000",  # Alternative dev port if needed
+    ]
 
 
 @asynccontextmanager

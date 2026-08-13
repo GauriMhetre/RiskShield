@@ -1,0 +1,35 @@
+# Exclude files and directories from the Docker build context to speed up builds and keep the image clean.
+# This serves a similar purpose to .gitignore, but specifically prevents these items from being copied into the image.
+
+# Git history
+.git/
+
+# Virtual environments
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Node modules
+node_modules/
+
+# Frontend (not needed in backend image)
+frontend/
+
+# Data and Notebooks
+data/raw/
+data/processed/*.csv
+notebooks/
+
+# Tests
+tests/
+.pytest_cache/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# Secrets
+.env

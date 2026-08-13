@@ -1,0 +1,53 @@
+# docker-compose.yml defines and wires together the RiskShield backend, frontend, and Postgres database.
+# Running `docker-compose up` from the repo root starts everything in a shared network.
+# Note: POSTGRES_PASSWORD and POSTGRES_DB need to exist in a root-level .env file for this to work.
+
+services:
+  postgres:
+    image: postgres:16
+    # Compose automatically reads a .env file in the same directory for variable substitution.
+    # This is distinct from python-dotenv's use of .env inside the Python app itself. 
+    # It's the same filename serving two different mechanisms!
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    # Mount a named volume to ensure data survives `docker-compose down`
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # We publish 5432 to the host for local scripts, but OTHER SERVICES in this compose file
+    # should use the service name "postgres" as the hostname, not localhost.
+    ports:
+      - "5435:5432"
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    # We use the 'postgres' service name as the hostname. This is the correct, portable way
+    # containers communicate, unlike the previous host.docker.internal workaround.
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    # depends_on only waits for the postgres CONTAINER to start, not for Postgres to be ready
+    # to accept connections. A first-run backend crash-and-manual-restart is a known, acceptable quirk
+    # for this project's scale.
+    depends_on:
+      - postgres
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+      # We pass localhost:8000 because this URL is baked into the static frontend files
+      # and evaluated by the BROWSER running on the host machine, which cannot resolve
+      # internal Docker hostnames like "backend:8000".
+      args:
+        VITE_API_BASE_URL: http://localhost:8000
+    depends_on:
+      - backend
+    ports:
+      - "5173:80"
+
+volumes:
+  postgres_data:

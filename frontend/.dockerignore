@@ -1,0 +1,6 @@
+# Exclude unnecessary files from Docker build context for the frontend
+node_modules/
+dist/
+.git/
+*.md
+.env*
