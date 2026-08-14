@@ -1,5 +1,7 @@
 # RiskShield
 
+![CI](https://github.com/<YOUR_GITHUB_USERNAME>/<YOUR_REPO_NAME>/actions/workflows/ci.yml/badge.svg)
+
 A real-time, ML-powered fraud detection platform.
 
 **[Live Demo](https://riskshield-frontend-YOUR-URL.onrender.com)** (Replace with your actual Render URL!)

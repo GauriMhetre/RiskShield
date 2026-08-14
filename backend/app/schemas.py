@@ -22,16 +22,16 @@ class ScoreRequest(BaseModel):
     updated to maintain consistency between API contract and documentation.
     """
 
-    txn_id: str = Field(..., description="Unique transaction identifier")
-    user_id: str = Field(..., description="Unique user identifier")
+    txn_id: str = Field(..., max_length=100, description="Unique transaction identifier")
+    user_id: str = Field(..., max_length=100, description="Unique user identifier")
     amount: float = Field(..., gt=0, description="Transaction amount (must be positive)")
-    currency: str = Field(..., description="Currency code (e.g., USD, INR)")
-    merchant_id: str = Field(..., description="Merchant identifier")
-    device_id: str = Field(..., description="Device fingerprint/identifier")
-    ip_address: str = Field(..., description="IP address of transaction origin")
-    country: str = Field(..., description="Country code where transaction occurred")
-    latitude: float = Field(..., description="Geographic latitude")
-    longitude: float = Field(..., description="Geographic longitude")
+    currency: str = Field(..., min_length=3, max_length=3, description="Currency code (e.g., USD, INR)")
+    merchant_id: str = Field(..., max_length=100, description="Merchant identifier")
+    device_id: str = Field(..., max_length=255, description="Device fingerprint/identifier")
+    ip_address: str = Field(..., max_length=45, description="IP address of transaction origin")
+    country: str = Field(..., min_length=2, max_length=2, description="Country code where transaction occurred")
+    latitude: float = Field(..., ge=-90, le=90, description="Geographic latitude")
+    longitude: float = Field(..., ge=-180, le=180, description="Geographic longitude")
     created_at: datetime = Field(..., description="Transaction timestamp")
 
     class Config:

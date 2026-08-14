@@ -1,0 +1,103 @@
+name: CI
+
+# Trigger on push and pull_request for any branch
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # GitHub Actions service containers
+    # We spin up a throwaway Postgres database purely for this CI run.
+    # It acts just like your local Docker container but is completely ephemeral.
+    services:
+      postgres:
+        image: postgres:16
+        # These are fixed CI-only credentials for a throwaway database.
+        # They are NOT real deployment secrets, so plain text here is perfectly safe.
+        env:
+          POSTGRES_PASSWORD: devpassword
+          POSTGRES_DB: riskshield_test
+        ports:
+          - 5432:5432
+        # A healthcheck ensures later steps wait for Postgres to be actually ready to accept connections.
+        # This prevents the exact race condition we saw locally where the backend starts before Postgres is ready.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      # Step 1: Checkout the repo
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Step 2: Set up Python with pip caching
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # Step 3: Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # Step 4: Apply the schema
+      # CI starts completely fresh, so we have to create our test database schema every time.
+      - name: Apply database schema
+        env:
+          PGPASSWORD: devpassword
+        run: |
+          psql -h localhost -U postgres -d riskshield_test -f db/schema.sql
+
+      # Step 5: Generate synthetic data
+      # CI starts with no data, so we run the generator script.
+      - name: Generate synthetic data
+        run: python data/generate_synthetic.py
+
+      # Step 6: Train a minimal model artifact
+      # test_model.py needs ml/models/model_v1.pkl to exist. Since we don't commit models
+      # to git, we train a minimal one here. We use an inline script because ml/train.py's
+      # main() runs 3 separate models for comparison, which is too slow and verbose for CI.
+      - name: Train minimal CI model
+        env:
+          PYTHONPATH: .
+        run: |
+          python -c "
+          from ml.train import load_and_featurize, time_based_split, compute_scale_pos_weight, train_xgboost, save_model_artifact
+          print('Generating minimal CI model artifact...')
+          features_df = load_and_featurize('data/processed/synthetic_transactions.csv')
+          df_train, df_val, _ = time_based_split(features_df)
+          feature_cols = [
+              'txn_count_1h', 'txn_count_24h', 'amount_zscore', 'amount_ratio_to_avg', 
+              'device_mismatch', 'country_mismatch', 'geo_distance_km', 'amount', 
+              'hour_of_day', 'day_of_week'
+          ]
+          scale_pos_weight = compute_scale_pos_weight(df_train, 'label')
+          model = train_xgboost(df_train, df_val, feature_cols, 'label', scale_pos_weight)
+          save_model_artifact(model, 0.5, feature_cols, 'model_v1', 'xgboost_class_weighted')
+          print('Saved minimal model_v1 for CI tests.')
+          "
+
+      # Step 6.5: Lint with ruff
+      # We place this BEFORE pytest so that if there are simple static issues (like unused imports or syntax errors),
+      # the pipeline fails immediately without wasting time spinning up the test suite.
+      # By not setting 'continue-on-error: true', this enforces linting just as strictly as tests.
+      - name: Run ruff lint
+        run: |
+          pip install ruff
+          ruff check .
+
+      # Step 7 & 8: Run pytest with the CI database URL
+      - name: Run pytest
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:devpassword@localhost:5432/riskshield_test
+          PYTHONPATH: .
+        run: |
+          pytest tests/ -v

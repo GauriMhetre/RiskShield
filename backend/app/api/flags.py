@@ -11,8 +11,8 @@ router = APIRouter(prefix="/flags", tags=["fraud-detection"])
 @router.get("")
 def get_flags(
     since: Optional[datetime] = Query(default=None),
-    min_score: float = Query(default=0.0),
-    limit: int = Query(default=50, le=200),
+    min_score: float = Query(default=0.0, ge=0.0, le=1.0),
+    limit: int = Query(default=50, ge=1, le=200),
     db: Session = Depends(get_db)
 ) -> list[dict]:
     """
