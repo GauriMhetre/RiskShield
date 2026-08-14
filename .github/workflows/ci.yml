@@ -97,6 +97,7 @@ jobs:
       # Step 7 & 8: Run pytest with the CI database URL
       - name: Run pytest
         env:
+          DATABASE_URL: postgresql://postgres:devpassword@localhost:5432/riskshield_test
           TEST_DATABASE_URL: postgresql://postgres:devpassword@localhost:5432/riskshield_test
           PYTHONPATH: .
         run: |
